@@ -40,6 +40,7 @@ class DoctrineEventSubscriber implements EventSubscriber
         $em = $args->getEntityManager();
         $uow = $em->getUnitOfWork();
 
+
         foreach ($uow->getScheduledEntityUpdates() as $entity) {
             $this->processEntity($em, $entity);
         }
@@ -57,15 +58,15 @@ class DoctrineEventSubscriber implements EventSubscriber
 
         /** @var PersistentCollection $collectionUpdate */
         foreach ($uow->getScheduledCollectionUpdates() as $collectionUpdate) {
-            foreach($collectionUpdate as $entity) {
+            foreach ($collectionUpdate as $entity) {
                 $this->processEntity($em, $entity);
             }
         }
 
         /** @var PersistentCollection $collectionDeletion */
-        foreach($uow->getScheduledCollectionDeletions() as $collectionDeletion) {
-            foreach($collectionDeletion as $entity) {
-                if(!is_object($entity)) {
+        foreach ($uow->getScheduledCollectionDeletions() as $collectionDeletion) {
+            foreach ($collectionDeletion as $entity) {
+                if (!is_object($entity)) {
                     return;
                 }
                 $this->processEntity($em, $entity, true);
@@ -73,14 +74,32 @@ class DoctrineEventSubscriber implements EventSubscriber
                 $this->container->get('nti.sync')->addToDeleteSyncState(ClassUtils::getClass($entity), $entity->$getIdentifier());
             }
         }
-
     }
 
     private function processEntity(EntityManagerInterface $em, $entity, $deleting = false)
     {
-        if(!is_object($entity)) {
+        $uow = $em->getUnitOfWork();
+
+        if (!is_object($entity)) {
             return;
         }
+
+        $ignoreProperties = $this->container->getParameter('nti.sync.last_timestamp.ignore_properties');
+        $changes = $uow->getEntityChangeSet($entity);
+        $totalPropertiesChanged = count($changes);
+
+        foreach (array_keys($changes) as $propertyChanged) {
+            foreach ($ignoreProperties as $ignoreProperty) {
+                if ($ignoreProperty["class"] == ClassUtils::getClass($entity) && $ignoreProperty["property"] == $propertyChanged) {
+                    $totalPropertiesChanged --;
+                }
+            }
+        }
+
+        if ($totalPropertiesChanged <= 0) {
+            return;
+        }
+
 
         $reflection = new \ReflectionClass(ClassUtils::getClass($entity));
         $annotationReader = new AnnotationReader();
@@ -95,16 +114,16 @@ class DoctrineEventSubscriber implements EventSubscriber
 
         // Update the mapping's sync state if exists
         $mapping = $em->getRepository(SyncMapping::class)->findOneBy(array("class" => ClassUtils::getClass($entity)));
-        if($mapping) {
+        if ($mapping) {
             $syncState = $em->getRepository(SyncState::class)->findOneBy(array("mapping" => $mapping));
-            if(!$syncState) {
+            if (!$syncState) {
                 $syncState = new SyncState();
                 $syncState->setMapping($mapping);
                 $em->persist($syncState);
             }
             $syncState->setTimestamp($timestamp);
-            if($uow->getEntityState($syncState) == UnitOfWork::STATE_MANAGED) {
-                if($syncState->getId()) {
+            if ($uow->getEntityState($syncState) == UnitOfWork::STATE_MANAGED) {
+                if ($syncState->getId()) {
                     $uow->recomputeSingleEntityChangeSet($em->getClassMetadata(SyncState::class), $syncState);
                 } else {
                     $uow->computeChangeSet($em->getClassMetadata(SyncState::class), $syncState);
@@ -113,17 +132,18 @@ class DoctrineEventSubscriber implements EventSubscriber
         }
 
         // Check if this class itself has a lastTimestamp
-        if(!$deleting && method_exists($entity, 'setLastTimestamp')) {
+        if (!$deleting && method_exists($entity, 'setLastTimestamp')) {
             $entity->setLastTimestamp($timestamp);
-            if($uow->getEntityState($entity) == UnitOfWork::STATE_MANAGED) {
+            if ($uow->getEntityState($entity) == UnitOfWork::STATE_MANAGED) {
                 $uow->recomputeSingleEntityChangeSet($em->getClassMetadata(ClassUtils::getClass($entity)), $entity);
             }
         }
 
         // Notify relationships
         /** @var \ReflectionProperty $property */
+
         foreach ($reflection->getProperties() as $property) {
-            if($property == null) {
+            if ($property == null) {
                 continue;
             }
             if (null !== ($annotation = $annotationReader->getPropertyAnnotation($property, SyncIgnore::class))) {
@@ -133,13 +153,13 @@ class DoctrineEventSubscriber implements EventSubscriber
             if (null !== ($annotation = $annotationReader->getPropertyAnnotation($property, SyncParent::class))) {
                 $getter = $annotation->getter;
                 $parent = $entity->$getter();
-                if($parent == null) {
+                if ($parent == null) {
                     continue;
                 }
                 // Using ClassUtils as $parent is actually a Proxy of the class
                 $reflrectionParent = new \ReflectionClass(ClassUtils::getClass($parent));
                 $syncParentAnnotation = $annotationReader->getClassAnnotation($reflrectionParent, SyncEntity::class);
-                if(!$syncParentAnnotation) {
+                if (!$syncParentAnnotation) {
                     continue;
                 }
                 $this->processEntity($em, $parent);
